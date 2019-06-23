@@ -11,6 +11,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <iostream>
 
 #include <cuda_runtime.h>
 #include <cufft.h>          // CUDA FFT Libraries
@@ -94,9 +95,11 @@ addForces_k(cData *v, int dx, int dy, int spx, int spy, float fx, float fy, int 
 
     cData vterm = *fj;
 
+    // Translation of threadblock, so that middle thread has highest contribution
     tx -= r;
     ty -= r;
 
+    // Calculate force factor
     float s = 1.f / (1.f + tx*tx*tx*tx + ty*ty*ty*ty);
     vterm.x += s * fx;
     vterm.y += s * fy;
@@ -122,6 +125,7 @@ advectVelocity_k(cData *v, float *vx, float *vy,
     // gtidx is the domain location in x for this thread
     if (gtidx < dx)
     {
+        // iterate over all grid cells for this thread
         for (p = 0; p < lb; p++)
         {
             // fi is the domain location in y for this thread
@@ -130,10 +134,19 @@ advectVelocity_k(cData *v, float *vx, float *vy,
             if (fi < dy)
             {
                 int fj = fi * pdx + gtidx;
+
+                // get velocity for current grid cell
                 vterm = tex2D<cData>(texObject, (float)gtidx, (float)fi);
+
+                // Trace the velocity vector backward to determine a new
+                // location in the grid
                 ploc.x = (gtidx + 0.5f) - (dt * vterm.x * dx);
                 ploc.y = (fi + 0.5f) - (dt * vterm.y * dy);
+
+                // texture reference object is configured with bilinear interpolation
                 vterm = tex2D<cData>(texObject, ploc.x, ploc.y);
+
+                // set new velocity values
                 vxterm = vterm.x;
                 vyterm = vterm.y;
                 vx[fj] = vxterm;
@@ -310,30 +323,29 @@ void addForces(cData *v, int dx, int dy, int spx, int spy, float fx, float fy, i
 }
 
 extern "C"
-void advectVelocity(cData *v, float *vx, float *vy, int dx, int pdx, int dy, float dt)
+void advectVelocity(int tidsx, int tidsy, int tilex, int tiley, cData *v, float *vx, float *vy, int dx, int pdx, int dy, float dt)
 {
-    dim3 grid((dx/TILEX)+(!(dx%TILEX)?0:1), (dy/TILEY)+(!(dy%TILEY)?0:1));
+    dim3 grid((dx/tilex)+(!(dx%tilex)?0:1), (dy/tiley)+(!(dy%tiley)?0:1));
 
-    dim3 tids(TIDSX, TIDSY);
+    dim3 tids(tidsx, tidsy);
 
     updateTexture(v, DIM*sizeof(cData), DIM, tPitch);
-    advectVelocity_k<<<grid, tids>>>(v, vx, vy, dx, pdx, dy, dt, TILEY/TIDSY, texObj);
+    advectVelocity_k<<<grid, tids>>>(v, vx, vy, dx, pdx, dy, dt, tiley/tidsy, texObj);
 
     getLastCudaError("advectVelocity_k failed.");
 }
 
 extern "C"
-void diffuseProject(cData *vx, cData *vy, int dx, int dy, float dt, float visc)
+void diffuseProject(int tidsx, int tidsy, int tilex, int tiley, cData *vx, cData *vy, int dx, int dy, float dt, float visc)
 {
     // Forward FFT
     checkCudaErrors(cufftExecR2C(planr2c, (cufftReal *)vx, (cufftComplex *)vx));
     checkCudaErrors(cufftExecR2C(planr2c, (cufftReal *)vy, (cufftComplex *)vy));
 
-    uint3 grid = make_uint3((dx/TILEX)+(!(dx%TILEX)?0:1),
-                            (dy/TILEY)+(!(dy%TILEY)?0:1), 1);
-    uint3 tids = make_uint3(TIDSX, TIDSY, 1);
+    uint3 grid = make_uint3((dx/tilex)+(!(dx%tilex)?0:1), (dy/tiley)+(!(dy%tiley)?0:1), 1);
+    uint3 tids = make_uint3(tidsx, tidsy, 1);
 
-    diffuseProject_k<<<grid, tids>>>(vx, vy, dx, dy, dt, visc, TILEY/TIDSY);
+    diffuseProject_k<<<grid, tids>>>(vx, vy, dx, dy, dt, visc, tiley/tidsy);
     getLastCudaError("diffuseProject_k failed.");
 
     // Inverse FFT
@@ -342,20 +354,20 @@ void diffuseProject(cData *vx, cData *vy, int dx, int dy, float dt, float visc)
 }
 
 extern "C"
-void updateVelocity(cData *v, float *vx, float *vy, int dx, int pdx, int dy)
+void updateVelocity(int tidsx, int tidsy, int tilex, int tiley, cData *v, float *vx, float *vy, int dx, int pdx, int dy)
 {
-    dim3 grid((dx/TILEX)+(!(dx%TILEX)?0:1), (dy/TILEY)+(!(dy%TILEY)?0:1));
-    dim3 tids(TIDSX, TIDSY);
+    dim3 grid((dx/tilex)+(!(dx%tilex)?0:1), (dy/tiley)+(!(dy%tiley)?0:1));
+    dim3 tids(tidsx, tidsy);
 
-    updateVelocity_k<<<grid, tids>>>(v, vx, vy, dx, pdx, dy, TILEY/TIDSY, tPitch);
+    updateVelocity_k<<<grid, tids>>>(v, vx, vy, dx, pdx, dy, tiley/tidsy, tPitch);
     getLastCudaError("updateVelocity_k failed.");
 }
 
 extern "C"
-void advectParticles(GLuint vbo, cData *v, int dx, int dy, float dt)
+void advectParticles(int tidsx, int tidsy, int tilex, int tiley, GLuint vbo, cData *v, int dx, int dy, float dt)
 {
-    dim3 grid((dx/TILEX)+(!(dx%TILEX)?0:1), (dy/TILEY)+(!(dy%TILEY)?0:1));
-    dim3 tids(TIDSX, TIDSY);
+    dim3 grid((dx/tilex)+(!(dx%tilex)?0:1), (dy/tiley)+(!(dy%tiley)?0:1));
+    dim3 tids(tidsx, tidsy);
 
     cData *p;
     cudaGraphicsMapResources(1, &cuda_vbo_resource, 0);
@@ -366,7 +378,7 @@ void advectParticles(GLuint vbo, cData *v, int dx, int dy, float dt)
                                          cuda_vbo_resource);
     getLastCudaError("cudaGraphicsResourceGetMappedPointer failed");
 
-    advectParticles_k<<<grid, tids>>>(p, v, dx, dy, dt, TILEY/TIDSY, tPitch);
+    advectParticles_k<<<grid, tids>>>(p, v, dx, dy, dt, tiley/tidsy, tPitch);
     getLastCudaError("advectParticles_k failed.");
 
     cudaGraphicsUnmapResources(1, &cuda_vbo_resource, 0);

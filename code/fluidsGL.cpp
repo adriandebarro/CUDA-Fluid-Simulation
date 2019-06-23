@@ -26,6 +26,11 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <ctime>
+#include <cstdio>
+#include <iostream>
+#include <chrono>
+#include <thread>
 
 // CUDA standard includes
 #include <cuda_runtime.h>
@@ -70,6 +75,12 @@ static int wHeight = MAX(512, DIM);
 static int clicked  = 0;
 static int fpsCount = 0;
 static int fpsLimit = 1;
+
+static int tilex = 64; // Tile width
+static int tiley = 64; // Tile height
+static int tidsx = 64; // Tids in X
+static int tidsy = 4; // Tids in Y
+
 StopWatchInterface *timer = NULL;
 
 // Particle data
@@ -92,19 +103,19 @@ bool g_bExitESC = false;
 CheckRender       *g_CheckRender = NULL;
 
 extern "C" void addForces(cData *v, int dx, int dy, int spx, int spy, float fx, float fy, int r);
-extern "C" void advectVelocity(cData *v, float *vx, float *vy, int dx, int pdx, int dy, float dt);
-extern "C" void diffuseProject(cData *vx, cData *vy, int dx, int dy, float dt, float visc);
-extern "C" void updateVelocity(cData *v, float *vx, float *vy, int dx, int pdx, int dy);
-extern "C" void advectParticles(GLuint vbo, cData *v, int dx, int dy, float dt);
+extern "C" void advectVelocity(int tidsx, int tidsy, int tilex, int tiley, cData *v, float *vx, float *vy, int dx, int pdx, int dy, float dt);
+extern "C" void diffuseProject(int tidsx, int tidsy, int tilex, int tiley, cData *vx, cData *vy, int dx, int dy, float dt, float visc);
+extern "C" void updateVelocity(int tidsx, int tidsy, int tilex, int tiley, cData *v, float *vx, float *vy, int dx, int pdx, int dy);
+extern "C" void advectParticles(int tidsx, int tidsy, int tilex, int tiley, GLuint vbo, cData *v, int dx, int dy, float dt);
 
 
 void simulateFluids(void)
 {
     // simulate fluid
-    advectVelocity(dvfield, (float *)vxfield, (float *)vyfield, DIM, RPADW, DIM, DT);
-    diffuseProject(vxfield, vyfield, CPADW, DIM, DT, VIS);
-    updateVelocity(dvfield, (float *)vxfield, (float *)vyfield, DIM, RPADW, DIM);
-    advectParticles(vbo, dvfield, DIM, DIM, DT);
+    advectVelocity(tidsx, tidsy, tilex, tiley, dvfield, (float *)vxfield, (float *)vyfield, DIM, RPADW, DIM, DT);
+    diffuseProject(tidsx, tidsy, tilex, tiley, vxfield, vyfield, CPADW, DIM, DT, VIS);
+    updateVelocity(tidsx, tidsy, tilex, tiley, dvfield, (float *)vxfield, (float *)vyfield, DIM, RPADW, DIM);
+    advectParticles(tidsx, tidsy, tilex, tiley, vbo, dvfield, DIM, DIM, DT);
 }
 
 void display(void)
@@ -183,56 +194,51 @@ float myrand(void)
     }
 }
 
-void initParticles(cData *p, int dx, int dy)
+void initParticles(cData *p, int dx, int dy, int mode)
 {
     int i, j;
-
-    for (i = 0; i < dy; i++)
+    switch (mode)
     {
-        for (j = 0; j < dx; j++)
-        {
-            p[i*dx+j].x = (j+0.5f+(myrand() - 0.5f))/dx;
-            p[i*dx+j].y = (i+0.5f+(myrand() - 0.5f))/dy;
-        }
-    }
-}
-
-void keyboard(unsigned char key, int x, int y)
-{
-    switch (key)
-    {
-        case 27:
-            g_bExitESC = true;
-            #if defined (__APPLE__) || defined(MACOSX)
-                exit(EXIT_SUCCESS);
-            #else
-                glutDestroyWindow(glutGetWindow());
-                return;
-            #endif
+        case 1:
+            for (i = dy/4; i < 3*dy/4; i++)
+            {
+                for (j = dx/4; j < 3*dx/4; j++)
+                {
+                    p[i*dx+j].x = (j+0.5f+(myrand() - 0.5f))/dx;
+                    p[i*dx+j].y = (i+0.5f+(myrand() - 0.5f))/dy;
+                }
+            }
             break;
 
-        case 'r':
-            memset(hvfield, 0, sizeof(cData) * DS);
-            cudaMemcpy(dvfield, hvfield, sizeof(cData) * DS,
-                       cudaMemcpyHostToDevice);
-
-            initParticles(particles, DIM, DIM);
-
-            cudaGraphicsUnregisterResource(cuda_vbo_resource);
-
-            getLastCudaError("cudaGraphicsUnregisterBuffer failed");
-
-            glBindBuffer(GL_ARRAY_BUFFER, vbo);
-            glBufferData(GL_ARRAY_BUFFER, sizeof(cData) * DS,
-                            particles, GL_DYNAMIC_DRAW_ARB);
-            glBindBuffer(GL_ARRAY_BUFFER, 0);
-
-            cudaGraphicsGLRegisterBuffer(&cuda_vbo_resource, vbo, cudaGraphicsMapFlagsNone);
-
-            getLastCudaError("cudaGraphicsGLRegisterBuffer failed");
+        case 2:
+            for (i = 0; i < dy; i++)
+            {
+                for (j = 0; j < dx; j++)
+                {
+                    p[i*dx+j].x = (j+0.5f+(myrand() - 0.5f))/dx;
+                    p[i*dx+j].y = (i+0.5f+(myrand() - 0.5f))/dy;
+                }
+            }
             break;
 
-        default:
+        case 3:
+            for (i = dy/8; i < 3*dy/8; i++)
+            {
+                for (j = 0; j < dx; j++)
+                {
+                    p[i*dx+j].x = (j+0.5f+(myrand() - 0.5f))/dx;
+                    p[i*dx+j].y = (i+0.5f+(myrand() - 0.5f))/dy;
+                }
+            }
+
+            for (i = 5*dy/8; i < 7*dy/8; i++)
+            {
+                for (j = 0; j < dx; j++)
+                {
+                    p[i*dx+j].x = (j+0.5f+(myrand() - 0.5f))/dx;
+                    p[i*dx+j].y = (i+0.5f+(myrand() - 0.5f))/dy;
+                }
+            }           
             break;
     }
 }
@@ -279,6 +285,211 @@ void reshape(int x, int y)
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
     glutPostRedisplay();
+}
+
+void simulateForce(int dir)
+{
+    int i;
+
+    switch (dir)
+    {
+        case 1:
+            lastx = 500;
+            lasty = 256;
+            for (i = 500; i > 450; i-=2) 
+            {
+                clicked = 1;
+                motion(i,lasty);
+            }
+            break;
+
+        case 2:
+            lastx = 12;
+            lasty = 256;
+
+            for (i = 12; i < 72; i+=2) 
+            {
+                clicked = 1;
+                motion(i,lasty);
+            }          
+            break;
+
+        case 3:
+            lastx = 256;
+            lasty = 12;
+
+            for (i = 12; i < 72; i+=2) 
+            {
+                clicked = 1;
+                motion(lastx,i);
+            }
+            break;
+
+        case 4:
+            lastx = 256;
+            lasty = 500;
+
+            for (i = 500; i > 450; i-=2) 
+            {
+                clicked = 1;
+                motion(lastx,i);
+            }        
+            break;
+    }
+
+    clicked = 0;
+}
+
+float timeTest()
+{
+    int i;
+    float timeCount = 0;
+    int simCount = 1000;
+
+    for (i = 0; i < simCount; i++)
+    {
+        std::clock_t start;
+        double duration;
+
+        start = std::clock();
+        simulateFluids();
+        duration = ( std::clock() - start ) / (double) CLOCKS_PER_SEC;
+        timeCount += duration;
+    }
+
+    timeCount = timeCount / simCount;
+    std::cout<<"Calculated time: "<< timeCount << '\n';
+    return timeCount;
+}
+
+void reset(int mode)
+{
+    memset(hvfield, 0, sizeof(cData) * DS);
+    cudaMemcpy(dvfield, hvfield, sizeof(cData) * DS,
+               cudaMemcpyHostToDevice);
+
+    free(particles);
+    particles = (cData *)malloc(sizeof(cData) * DS);
+    memset(particles, 0, sizeof(cData) * DS);
+
+    initParticles(particles, DIM, DIM, mode);
+
+    cudaGraphicsUnregisterResource(cuda_vbo_resource);
+
+    getLastCudaError("cudaGraphicsUnregisterBuffer failed");
+
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(cData) * DS,
+                    particles, GL_DYNAMIC_DRAW_ARB);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    cudaGraphicsGLRegisterBuffer(&cuda_vbo_resource, vbo, cudaGraphicsMapFlagsNone);
+
+    getLastCudaError("cudaGraphicsGLRegisterBuffer failed");
+}
+
+void keyboard(unsigned char key, int x, int y)
+{
+    switch (key)
+    {
+        case 27:
+            g_bExitESC = true;
+            #if defined (__APPLE__) || defined(MACOSX)
+                exit(EXIT_SUCCESS);
+            #else
+                glutDestroyWindow(glutGetWindow());
+                return;
+            #endif
+            break;
+
+        case 'r':
+            reset(1);
+            break;
+
+        case 't':
+            reset(2);
+            break;
+
+        case 'z':
+            reset(3);
+            break;                        
+
+        case 'a':
+            simulateForce(1);
+            break;
+
+        case 'd':
+            simulateForce(2);
+            break;
+
+        case 'w':
+            simulateForce(4);
+            break;
+
+        case 's':
+            simulateForce(3);
+            break;            
+
+        case 'q':
+            std::cout<<"Used configuration: tidsx: "<< tidsx << " tidsy: " << tidsy << '\n';
+            simulateForce(1);
+            timeTest();
+            break;
+
+        case 'f':
+            {
+                using namespace std::this_thread; // sleep_for, sleep_until
+                using namespace std::chrono; // nanoseconds, system_clock, seconds
+
+                std::cout<<"Used configuration: tidsx: "<< tidsx << " tidsy: " << tidsy << '\n';
+                simulateForce(1);
+                timeTest();
+                reset(1);
+                break;
+            }
+
+        case 'g':
+            {
+                using namespace std::this_thread; // sleep_for, sleep_until
+                using namespace std::chrono; // nanoseconds, system_clock, seconds
+
+                int squareSize = 512;
+
+                for (int j = 0; j < log2(squareSize); j++)
+                {
+                    squareSize /= 2;
+
+                    tilex = squareSize;
+                    tiley = squareSize;
+                    tidsx = squareSize;
+                    tidsy = 2*std::min(1024/tidsx, tiley);
+                    int size = log2(tidsy);
+                    float timeArr[size];
+                    int i;
+
+                    for (i = 0; i < size; i++) 
+                    {
+                        tidsy /= 2; 
+
+                        std::cout<<"Used configuration: tidsx: "<< tidsx << " tidsy: " << tidsy << '\n';
+                        simulateForce(1);
+                        timeArr[i] = timeTest();
+                        reset(1);
+                    }
+
+                    std::ofstream fout("results.csv", std::ios_base::app);
+                    fout << "Config: " << squareSize << std::endl;
+                    for (auto& item : timeArr) {
+                        fout << item*pow(10,6) <<',';
+                    }
+                    fout << std::endl;
+                }
+                break;
+            }
+            
+        default:
+            break;
+    }
 }
 
 void cleanup(void)
@@ -334,7 +545,6 @@ int initGL(int *argc, char **argv)
     return true;
 }
 
-
 int main(int argc, char **argv)
 {
     int devID;
@@ -351,8 +561,6 @@ int main(int argc, char **argv)
 #endif
 
     printf("%s Starting...\n\n", sSDKname);
-
-    printf("NOTE: The CUDA Samples are not meant for performance measurements. Results may vary when GPU Boost is enabled.\n\n");
 
     // First initialize OpenGL context, so we can properly set the GL for CUDA.
     // This is necessary in order to achieve optimal performance with OpenGL/CUDA interop.
@@ -399,7 +607,7 @@ int main(int argc, char **argv)
     particles = (cData *)malloc(sizeof(cData) * DS);
     memset(particles, 0, sizeof(cData) * DS);
 
-    initParticles(particles, DIM, DIM);
+    initParticles(particles, DIM, DIM, 1);
 
     // Create CUFFT transform plan configuration
     checkCudaErrors(cufftPlan2d(&planr2c, DIM, DIM, CUFFT_R2C));
